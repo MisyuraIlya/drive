@@ -5,23 +5,37 @@ services:
     image: postgres:latest
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${BLUEPRINT_DB_DATABASE}
-      POSTGRES_USER: ${BLUEPRINT_DB_USERNAME}
-      POSTGRES_PASSWORD: ${BLUEPRINT_DB_PASSWORD}
+      POSTGRES_DB: blueprint
+      POSTGRES_USER: melkey
+      POSTGRES_PASSWORD: password1234
     ports:
-      - "${BLUEPRINT_DB_PORT}:5432"
+      - "5432:5432"
     volumes:
       - psql_volume_bp:/var/lib/postgresql/data
+
+  migrate:
+    image: migrate/migrate:v4.15.2
+    depends_on:
+      - psql_bp
+    environment:
+      DATABASE_URL: "postgres://melkey:password1234@psql_bp:5432/blueprint?sslmode=disable&search_path=public"
+    volumes:
+      - ./migrations:/migrations
+    command: [
+      "-path", "/migrations",
+      "-database", "postgres://melkey:password1234@psql_bp:5432/blueprint?sslmode=disable&search_path=public",
+      "up"
+    ]
 
   minio:
     image: minio/minio:latest
     command: server /data
     restart: unless-stopped
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: ChangeMeToAStrongPwd123!
     ports:
-      - "${MINIO_PORT}:9000"
+      - "9000:9000"
     volumes:
       - minio_data:/data
 

@@ -41,6 +41,7 @@ func main() {
 
 	server := server.NewServer()
 
+	log.Printf("Server starting on %s\n", server.Addr)
 	// Create a done channel to signal when the shutdown is complete
 	done := make(chan bool, 1)
 
