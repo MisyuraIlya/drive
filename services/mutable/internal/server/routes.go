@@ -86,7 +86,6 @@ func (s *Server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. Get file part
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		http.Error(w, "file is required: "+err.Error(), http.StatusBadRequest)
@@ -94,28 +93,24 @@ func (s *Server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// 5. Read file into memory (for hashing & upload)
 	data, err := io.ReadAll(file)
 	if err != nil {
 		http.Error(w, "failed to read file: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// 6. Compute SHA-256 hash for deduplication
 	sum := sha256.Sum256(data)
 	fileHash := hex.EncodeToString(sum[:])
 
 	ctx := r.Context()
 	db := s.db.(database.Service).DB()
 
-	// 7. Check for existing file by hash
 	var existingID int
 	err = db.QueryRowContext(ctx,
 		"SELECT id FROM files WHERE file_hash = $1", fileHash,
 	).Scan(&existingID)
 
 	if err == nil {
-		// duplicate: ensure we don't insert multiple refs/originals for the same user
 		var existingRefID int
 		refErr := db.QueryRowContext(ctx,
 			`SELECT id FROM files
@@ -125,7 +120,6 @@ func (s *Server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 		).Scan(&existingRefID)
 
 		if refErr == nil {
-			// User already has a record for this content
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprintf(w, `{"message":"Already uploaded","file_id":%d}`, existingRefID)
 			return
@@ -134,7 +128,6 @@ func (s *Server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// insert new reference row WITHOUT the file_hash
 		var refID int
 		err = db.QueryRowContext(ctx, `
 		    INSERT INTO files (name, user_id, parent_file_id, type, ready)
@@ -152,12 +145,10 @@ func (s *Server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 
 	} else if err != sql.ErrNoRows {
-		// some other DB error
 		http.Error(w, "database error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// 8. No duplicate: insert a new file record (not yet ready)
 	var newID int
 	err = db.QueryRowContext(ctx,
 		`INSERT INTO files (name, user_id, type, ready, file_hash)
@@ -171,25 +162,21 @@ func (s *Server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	objectName := strconv.Itoa(newID)
 
-	// 9. Upload to MinIO
 	reader := bytes.NewReader(data)
 	_, err = s.s3.PutObject(ctx, bucketName, objectName, reader, int64(len(data)), minio.PutObjectOptions{
 		ContentType: header.Header.Get("Content-Type"),
 	})
 	if err != nil {
-		// Rollback metadata if upload fails
 		db.ExecContext(ctx, "DELETE FROM files WHERE id = $1", newID)
 		http.Error(w, "failed to store file: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// 10. Mark file as ready
 	_, err = db.ExecContext(ctx, "UPDATE files SET ready = true WHERE id = $1", newID)
 	if err != nil {
 		log.Printf("warning: failed to mark ready: %v", err)
 	}
 
-	// 11. Record single chunk (index 0)
 	_, err = db.ExecContext(ctx,
 		`INSERT INTO chunks (user_id, file_id, chunk_hash, index)
 		 VALUES ($1,$2,$3,$4)`, userID, newID, fileHash, 0,
@@ -218,7 +205,6 @@ func (s *Server) deleteHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	db := s.db.(database.Service).DB()
 
-	// Find parent reference
 	var parent sql.NullInt64
 	err = db.QueryRowContext(ctx,
 		"SELECT parent_file_id FROM files WHERE id = $1 AND user_id = $2",
@@ -244,7 +230,6 @@ func (s *Server) deleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Original file: check for other references
 	var refCount int
 	err = db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM files WHERE parent_file_id = $1", fileID,
@@ -254,20 +239,17 @@ func (s *Server) deleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete metadata record
 	_, err = db.ExecContext(ctx, "DELETE FROM files WHERE id = $1", fileID)
 	if err != nil {
 		http.Error(w, "failed to delete metadata: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// If still referenced by others, keep storage
 	if refCount > 0 {
 		fmt.Fprintf(w, `{"message":"Record deleted; %d references remain, keeping content."}`, refCount)
 		return
 	}
 
-	// No more references: clean up storage and chunks
 	objectName := strconv.Itoa(fileID)
 	if err := s.s3.RemoveObject(ctx, bucketName, objectName, minio.RemoveObjectOptions{}); err != nil {
 		log.Printf("minio remove error: %v", err)
